@@ -926,6 +926,8 @@ bool emu_run_game(const char *path, const char *save_name, const char *title)
 	cheats_load(game_name);
 	sync_widescreen();
 	psx3d_set_half3d(g_cfg.half3d);
+	// debug=1 in config.ini also turns the profiler on, so it works from the CIA too
+	sw_prof = sw_prof || g_cfg.debug;
 	psx3d_prof_on = sw_prof;
 	controls_load();
 	{
