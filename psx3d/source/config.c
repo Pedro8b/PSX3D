@@ -40,6 +40,9 @@ static void set_defaults(void)
 	g_cfg.bottom_off = 1;
 	g_cfg.autosave = 1;
 	g_cfg.half3d = !g_new3ds;
+	// Old 3DS often runs below full speed: slow the sound down with the game
+	// instead of letting the DSP run dry (crackling)
+	g_cfg.audio_stretch = g_new3ds ? 0 : 30;
 	for (size_t i = 0; i < sizeof(tuned_defaults) / sizeof(tuned_defaults[0]); i++)
 		if (tuned_defaults[i][0])
 			config_set_core_override(tuned_defaults[i][0], tuned_defaults[i][1]);
@@ -91,6 +94,8 @@ void config_load(void)
 			g_cfg.half3d = atoi(v) != 0;
 		else if (strcmp(k, "autosave") == 0)
 			g_cfg.autosave = atoi(v) != 0;
+		else if (strcmp(k, "audio_stretch") == 0)
+			g_cfg.audio_stretch = atoi(v) < 0 ? 0 : atoi(v) > 50 ? 50 : atoi(v);
 		else if (strcmp(k, "debug") == 0)
 			g_cfg.debug = atoi(v) != 0;
 		else if (strcmp(k, "smooth") == 0)
@@ -127,6 +132,7 @@ void config_save(void)
 	fprintf(f, "sounds=%d\nmusic=%d\nbottom_off=%d\n", g_cfg.sounds, g_cfg.music, g_cfg.bottom_off);
 	fprintf(f, "autosave=%d\n", g_cfg.autosave);
 	fprintf(f, "half3d=%d\n", g_cfg.half3d);
+	fprintf(f, "audio_stretch=%d\n", g_cfg.audio_stretch);
 	if (g_cfg.debug)
 		fprintf(f, "debug=1\n");
 	for (int i = 0; i < novr; i++) {

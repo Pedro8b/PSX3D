@@ -39,6 +39,7 @@ typedef struct {
 	int  bottom_off;   // backlight off on the bottom screen while playing
 	int  autosave;     // save on exit, offer to continue next time
 	int  half3d;       // draw 3D polygons at half vertical resolution (Old 3DS default)
+	int  audio_stretch; // % the sound may slow down when emulation can't keep up (0 = only drift correction)
 } psx3d_config;
 
 extern psx3d_config g_cfg;

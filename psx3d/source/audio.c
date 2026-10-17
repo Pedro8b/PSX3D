@@ -17,7 +17,7 @@
 #define NBUF         16
 #define BUF_FRAMES   512            // 11.6 ms each, 186 ms in total
 #define TARGET_QUEUE 3072           // ~70 ms of queued audio
-#define MAX_ADJUST   0.005
+#define MAX_ADJUST   0.005          // drift correction, both ways
 
 static int16_t *bufmem;             // NBUF * BUF_FRAMES stereo frames, linear memory
 static ndspWaveBuf wb[NBUF];
@@ -447,7 +447,14 @@ size_t audio_write(const int16_t *data, size_t frames)
 	double err = (avg_queue - TARGET_QUEUE) / TARGET_QUEUE;
 	if (err > 1.0) err = 1.0;
 	if (err < -1.0) err = -1.0;
-	float step = (float)(1.0 + err * MAX_ADJUST);   // input frames per output frame
+	// Below the target the game is producing less sound than the DSP plays,
+	// i.e. emulation is slower than real time. Instead of running dry (a click
+	// every buffer), stretch: play slower, lower pitch, but continuous.
+	// Only well below the target (a quarter of the queue gone, on average), so
+	// the normal saw of the queue level doesn't make the pitch wobble.
+	double max_slow = g_cfg.audio_stretch / 100.0;
+	double slow = err < -0.25 ? (-0.25 - err) / 0.75 * max_slow : 0.0;
+	float step = (float)(1.0 + err * MAX_ADJUST - slow);   // input frames per output frame
 	st.rate = (float)(base_rate * step);
 
 	size_t nout = resample((const int16_t *)data, frames, step, out, sizeof(out) / 4);
