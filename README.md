@@ -1,3 +1,61 @@
+# PSX3D O3DS
+
+**This is a fork of [PSX3D](https://github.com/BreadChaser/PSX3D) by BreadChaser.**
+Its only goal is to get as much speed as possible out of the Old 3DS / 3DS XL / 2DS
+(268 MHz, no L2 cache), so that at least 2D games play at full speed. Everything
+here is experimental and tested on one Old 3DS so far; for the New 3DS, use the
+original.
+
+> **LLM notice.** Most of the code changes, analysis and text in this fork were
+> written with the help of an LLM (Anthropic's Claude), guided and tested on real
+> hardware by the fork's author. Review them with that in mind.
+
+The fork installs next to the original (its own title ID, shown as "PSX3D O3DS")
+and shares its folder `sdmc:/3ds/PSX3D/` (settings, saves, covers). It writes its
+own log, `log_o3ds.txt`.
+
+### What's different
+
+Measured in Castlevania: Symphony of the Night on an Old 3DS, most of the frame
+time went to drawing (7-28 ms of 18-35 ms), then events and disc reads, then the
+PS1 CPU. The changes target that:
+
+- **Frameskip by timing.** Frameskip `auto` now skips drawing the next frame
+  whenever the current one started late, instead of waiting for the sound buffer
+  to run low. The game keeps its speed; up to 3 frames in a row are skipped on
+  Old 3DS. This was the biggest single win.
+- **Sound that slows down instead of crackling.** When emulation can't keep up,
+  playback glides slower (lower pitch) rather than running dry.
+  `audio_stretch=30` in `config.ini` sets the maximum, in percent (0 = off).
+- **"Skip every 2nd line" drawing** (Core options). Draws only every other line
+  and shows each twice: +15-20% speed in heavy scenes, but small text becomes hard
+  to read. Off is recommended for everyday play.
+- **Idle loop skip** (Core options, "Idle loop skip (PSX3D)"). The dynarec spots
+  short polling loops (a game waiting for the GPU, the CD, a timer) and lets
+  emulated time pass in 1024-cycle steps there instead of spinning. Turn it off
+  if a game misbehaves.
+- **Disc read-ahead on the syscore.** The Old 3DS's second core is only lent to
+  apps 30% of the time, but waiting on the SD card costs almost no CPU, so disc
+  prefetching runs there. The main thread never waits for it.
+- **Memory.** The dynarec code cache is 8 MB instead of 16 MB, which leaves room
+  for save states and "Continue where I left off" on Old 3DS (they used to fail
+  with "Not enough memory").
+- **Profiler.** With `debug=1` in `config.ini`, the log shows once a second where
+  frame time goes: drawing by primitive kind, events, disc and XA reads, picture
+  output, frames skipped, and where the PS1 CPU spends its time.
+
+Recommended Old 3DS setup: Frameskip type `auto`, Frameskip interval `3`,
+"Skip every 2nd line" off (on for the heaviest games), 3D resolution `half`.
+Old `core.*` lines left in `config.ini` from earlier versions override the
+defaults; delete them if a setting doesn't seem to apply.
+
+Core changes are kept as patches in `patches/` (0003 and 0004 are this fork's),
+applied to the PCSX-ReARMed submodule at build time like the original's.
+
+---
+
+*The original README follows.*
+
 # PSX3D
 
 PSX3D is a standalone PlayStation emulator for the Nintendo 3DS. It runs the
