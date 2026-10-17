@@ -1,0 +1,90 @@
+diff --git a/libpcsxcore/cdrom-async.c b/libpcsxcore/cdrom-async.c
+index 264c739c..3b82ccf6 100644
+--- a/libpcsxcore/cdrom-async.c
++++ b/libpcsxcore/cdrom-async.c
+@@ -44,6 +44,10 @@ static int  rcdrom_isMediaInserted(void *stream) { return 0; }
+ #endif
+ 
+ #include "../frontend/pcsxr-threads.h"
++#if defined(_3DS) && !defined(USE_C11_THREADS)
++#include <stdbool.h>
++bool slock_try_lock(slock_t *lock);   // libretro-common rthreads
++#endif
+ #ifdef HAVE_LIBRETRO
+ #include "retro_timers.h"
+ #endif
+@@ -116,12 +120,22 @@ static void lbacache_do(u32 lba, u32 cdda_bit)
+ #endif
+ }
+ 
+-static int lbacache_get(unsigned int lba, void *buf, void *sub_buf, int is_cdda)
++static int lbacache_get_(unsigned int lba, void *buf, void *sub_buf, int is_cdda, int may_wait)
+ {
+    u32 i, cdda_bit = is_cdda ? (1u << 31) : 0;
+    int ret = 0;
+ 
+    i = lba % acdrom.buf_cnt;
++#ifdef _3DS
++   // PSX3D: on Old 3DS the prefetch thread lives on the syscore, which only
++   // runs it in time slices. If it got stopped holding the lock, don't wait
++   // for its next slice: count it as a miss and read the sector directly.
++   if (!may_wait) {
++      if (!slock_try_lock(acdrom.buf_lock))
++         return 0;
++   }
++   else
++#endif
+    slock_lock(acdrom.buf_lock);
+    if ((lba | cdda_bit) == acdrom.buf_cache[i].lba_wflag) {
+       if (buf)
+@@ -134,6 +148,11 @@ static int lbacache_get(unsigned int lba, void *buf, void *sub_buf, int is_cdda)
+    return ret;
+ }
+ 
++static int lbacache_get(unsigned int lba, void *buf, void *sub_buf, int is_cdda)
++{
++   return lbacache_get_(lba, buf, sub_buf, is_cdda, 1);
++}
++
+ // note: This has races on some vars but that's ok, main thread can deal
+ // with it. Only unsafe buffer accesses and simultaneous reads are prevented.
+ static STRHEAD_RET_TYPE cdra_prefetch_thread(void *unused)
+@@ -328,7 +347,7 @@ static int cdra_do_read(const unsigned char *time, int is_cdda,
+    do
+    {
+       if (acdrom.buf_lock) {
+-         hit = lbacache_get(lba, buf, buf_sub, is_cdda);
++         hit = lbacache_get_(lba, buf, buf_sub, is_cdda, 0);
+          if (hit)
+             break;
+       }
+diff --git a/plugins/gpu_unai/gpulib_if.cpp b/plugins/gpu_unai/gpulib_if.cpp
+index fa231670..173eebb8 100644
+--- a/plugins/gpu_unai/gpulib_if.cpp
++++ b/plugins/gpu_unai/gpulib_if.cpp
+@@ -713,6 +713,7 @@ extern const unsigned char cmd_lengths[256];
+ extern "C" {
+ unsigned long long psx3d_gprof_t[9];
+ unsigned int psx3d_gprof_c[9];
++int psx3d_gprof_on;   // frontend: time primitives this frame (a sample of frames)
+ }
+ // 0 fill, 1 polygon, 2 textured polygon, 3 textured polygon semi-transparent,
+ // 4 line, 5 rectangle, 6 sprite, 7 sprite semi-transparent, 8 other
+@@ -750,7 +751,7 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
+       cmd = -1;
+       break;
+     }
+-    if (psx3d_prof_on) {
++    if (psx3d_gprof_on) {
+       unsigned long long now = PROF_TICK();
+       if (gp_cls >= 0)
+         psx3d_gprof_t[gp_cls] += now - gp_t;
+@@ -1204,7 +1205,7 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
+   }
+ 
+ breakloop:
+-  if (psx3d_prof_on && gp_cls >= 0)
++  if (psx3d_gprof_on && gp_cls >= 0)
+     psx3d_gprof_t[gp_cls] += PROF_TICK() - gp_t;
+   if (vram_saved)
+     gpu_unai.vram = vram_saved;

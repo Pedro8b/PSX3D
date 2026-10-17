@@ -927,9 +927,10 @@ static void prof_report(int frames)
 
 	n = 0;
 	for (k = 0; k < 9; k++) {
+		// sampled on 1 frame in 4
 		if (psx3d_gprof_c[k])
 			n += snprintf(b + n, sizeof(b) - n, " %s %.2f/%u", g_names[k],
-				psx3d_gprof_t[k] * per * ms, (unsigned)(psx3d_gprof_c[k] * per + 0.5));
+				psx3d_gprof_t[k] * 4 * per * ms, (unsigned)(psx3d_gprof_c[k] * 4 * per + 0.5));
 		psx3d_gprof_t[k] = 0;
 		psx3d_gprof_c[k] = 0;
 	}
@@ -1037,6 +1038,8 @@ bool emu_run_game(const char *path, const char *save_name, const char *title)
 		u64 now_t = svcGetSystemTick();
 		// this frame starts late: the last one took longer than a frame
 		bool behind = now_t > next_deadline + frame_ticks / 8;
+		// timing every primitive costs a system call each: do it on 1 frame in 4
+		psx3d_gprof_on = sw_prof && (fps_frames & 3) == 0;
 		if (now_t < next_deadline)
 			svcSleepThread((next_deadline - now_t) * 1000000000ULL / SYSCLOCK_ARM11);
 		else if (now_t > next_deadline + 3 * frame_ticks)

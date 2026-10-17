@@ -103,6 +103,7 @@ extern unsigned int psx3d_irq_c[];
 extern unsigned int psx3d_pcs_pc[64], psx3d_pcs_n[64], psx3d_pcs_total;   // guest PC samples
 extern unsigned long long psx3d_gprof_t[9];   // drawing time by primitive kind
 extern unsigned int psx3d_gprof_c[9];
+extern int psx3d_gprof_on;                    // time primitives this frame
 extern unsigned int psx3d_fskip[2];           // frames skipped / skip refused
 extern int psx3d_idle_skip;                   // dynarec: polling loop detection
 extern unsigned int psx3d_idle_loops;

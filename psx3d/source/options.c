@@ -69,7 +69,10 @@ static const char *locked_value(const char *key)
 			snprintf(b, sizeof(b), "%d", g_syscore_pct ? g_syscore_pct : 35);
 			return b;
 		}
-		if (strcmp(key, "pcsx_rearmed_cd_readahead") == 0)
+		// read-ahead runs on the syscore: waiting on the SD card costs it
+		// almost no CPU time, so its 30% slice is plenty. Without syscore time
+		// (some Homebrew Launcher paths) the thread would starve: keep it off.
+		if (strcmp(key, "pcsx_rearmed_cd_readahead") == 0 && g_syscore_pct == 0)
 			return "0";
 		// gaussian interpolation costs real time on a 268MHz core
 		if (strcmp(key, "pcsx_rearmed_spu_interpolation") == 0)
@@ -220,7 +223,7 @@ const char *options_get(const char *key)
 	if (!ov && !g_new3ds) {
 		static const char *const o3ds[][2] = {
 			{ "pcsx_rearmed_frameskip_type", "auto" },        // skip drawing, keep game speed
-			{ "pcsx_rearmed_frameskip_interval", "2" },       // at most 2 skipped in a row
+			{ "pcsx_rearmed_frameskip_interval", "3" },       // at most 3 skipped in a row
 			{ "pcsx_rearmed_gpu_unai_fast_lighting", "enabled" },
 			{ "pcsx_rearmed_dithering", "disabled" },
 			{ "pcsx_rearmed_spu_reverb", "disabled" },
@@ -299,7 +302,7 @@ static const char *const notes[][3] = {
 	{ "pcsx_rearmed_gteregsunneeded", "Faster (small), may cause glitches", "Skips saving some 3D math results games rarely read back. Usually safe; rare graphics glitches." },
 	{ "pcsx_rearmed_nogteflags", "Faster (small), can cause graphics errors", "Skips the 3D math unit's overflow flags. A few games use them for clipping and draw wrong without them." },
 	{ "pcsx_rearmed_cd_turbo", "Faster loading, can crash games", NULL },
-	{ "pcsx_rearmed_cd_readahead", "Fewer loading stutters on New 3DS", "Reads ahead on the disc image on a spare core, so the game doesn't wait for the SD card." },
+	{ "pcsx_rearmed_cd_readahead", "Fewer loading stutters", "Reads ahead on the disc image on a spare core, so the game doesn't wait for the SD card." },
 	{ "pcsx_rearmed_icache_emulation", "Slightly slower when on", NULL },
 	{ "pcsx_rearmed_region", "No speed effect", NULL },
 	{ "pcsx_rearmed_bios", "No speed effect", "Which BIOS to use. A real BIOS in sdmc:/3ds/PSX3D/bios fixes some games that don't boot with the built-in one." },

@@ -453,7 +453,15 @@ size_t audio_write(const int16_t *data, size_t frames)
 	// Only well below the target (a quarter of the queue gone, on average), so
 	// the normal saw of the queue level doesn't make the pitch wobble.
 	double max_slow = g_cfg.audio_stretch / 100.0;
-	double slow = err < -0.25 ? (-0.25 - err) / 0.75 * max_slow : 0.0;
+	double want = err < -0.25 ? (-0.25 - err) / 0.75 * max_slow : 0.0;
+	// Glide towards it: following every dip at once made the pitch warble
+	// like a worn tape. At most ~3% per second; underruns while it catches
+	// up are the lesser evil.
+	static double slow;
+	double d = want - slow;
+	if (d > 0.0005) d = 0.0005;
+	if (d < -0.0005) d = -0.0005;
+	slow += d;
 	float step = (float)(1.0 + err * MAX_ADJUST - slow);   // input frames per output frame
 	st.rate = (float)(base_rate * step);
 
