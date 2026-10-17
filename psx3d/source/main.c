@@ -33,7 +33,11 @@ void __system_allocateHeaps(void)
 	svcCloseHandle(reslimit);
 
 	u32 remaining = (u32)(max_commit - cur_commit) & ~0xFFF;
-	u32 reserve = remaining > 80 * MB ? 12 * MB : 8 * MB;
+	// reserve: what the core maps at fixed addresses (RAM 2MB, BIOS, 8MB of
+	// lookup tables). Old 3DS has room for all of it since the dynarec's
+	// code cache went from 16MB to 8MB; with 8MB the tables didn't fit and
+	// came out of the heap, leaving too little for save states.
+	u32 reserve = remaining > 44 * MB ? 12 * MB : 8 * MB;
 	u32 linear = remaining / 3;
 	if (linear > 24 * MB) linear = 24 * MB;
 	if (linear < 12 * MB) linear = 12 * MB;

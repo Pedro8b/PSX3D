@@ -1,0 +1,472 @@
+diff --git a/frontend/libretro.c b/frontend/libretro.c
+index a281df04..e437e925 100644
+--- a/frontend/libretro.c
++++ b/frontend/libretro.c
+@@ -33,6 +33,7 @@
+ #include "../libpcsxcore/new_dynarec/new_dynarec.h"
+ #include "../libpcsxcore/gte.h"
+ #include "../libpcsxcore/psx3d_depth.h"
++#include "../libpcsxcore/psx3d_prof.h"
+ #include "../libpcsxcore/cdrom.h"
+ #include "../libpcsxcore/cdrom-async.h"
+ #include "../libpcsxcore/cdriso.h"
+@@ -451,10 +452,28 @@ static void vout_flip(const void *vram_, int vram_ofs, int bgr24,
+    h = min(h, vout_height);
+    dest += x * bytes_pp + y * dstride;
+ 
++   PROF_BEGIN(PROF_VOUT);
++   if (pl_rearmed_cbs.gpu_unai.ilace_force && sstride == 2048 && !bgr24) {
++      // PSX3D: "skip every 2nd line" left the odd lines undrawn, show each
++      // drawn line twice instead of last time's leftovers
++      for (h1 = 0; h1 < h; h1++, dest += dstride) {
++         if ((vram_ofs >> 11) & 1) {
++            if (h1 > 0)
++               memcpy(dest, dest - dstride, w_blit * bytes_pp);
++            else
++               bgr_to_fb(dest, vram + ((vram_ofs + sstride) & vram_mask), w_blit);
++         }
++         else
++            bgr_to_fb(dest, vram + vram_ofs, w_blit);
++         vram_ofs = (vram_ofs + sstride) & vram_mask;
++      }
++   }
++   else
+    for (h1 = h; h1-- > 0; dest += dstride) {
+       bgr_to_fb(dest, vram + vram_ofs, w_blit);
+       vram_ofs = (vram_ofs + sstride) & vram_mask;
+    }
++   PROF_END(PROF_VOUT);
+ 
+    hwrapped = (vram_ofs & 2047) + w * bytes_pp_s - 2048;
+    if (!enhres && hwrapped > 0) {
+diff --git a/libpcsxcore/cdrom.c b/libpcsxcore/cdrom.c
+index 11c435f8..d312257f 100644
+--- a/libpcsxcore/cdrom.c
++++ b/libpcsxcore/cdrom.c
+@@ -24,6 +24,7 @@
+ #include <stdalign.h>
+ #include <assert.h>
+ #include "cdrom.h"
++#include "psx3d_prof.h"
+ #include "cdrom_bits.h"
+ #include "cdrom-async.h"
+ #include "misc.h"
+@@ -416,7 +417,11 @@ static int ReadTrack(const u8 *time)
+ 	if (memcmp(cdr.Prev, time, 3) == 0)
+ 		return 1;
+ 
+-	ret = cdra_readTrack(time);
++	{
++		PROF_BEGIN(PROF_CDR);
++		ret = cdra_readTrack(time);
++		PROF_END(PROF_CDR);
++	}
+ 	if (ret == 0)
+ 		memcpy(cdr.Prev, time, 3);
+ 	else
+@@ -643,7 +648,11 @@ void cdrPlayReadInterrupt(void)
+ 		cdr.DriveState = DRIVESTATE_PAUSED;
+ 	}
+ 	else {
+-		cdra_readCDDA(cdr.SetSectorPlay, read_buf);
++		{
++			PROF_BEGIN(PROF_CDR);
++			cdra_readCDDA(cdr.SetSectorPlay, read_buf);
++			PROF_END(PROF_CDR);
++		}
+ 	}
+ 
+ 	if (!cdr.IrqStat && (cdr.Mode & (MODE_AUTOPAUSE|MODE_REPORT)))
+@@ -1402,7 +1411,11 @@ static void cdrReadInterrupt(void)
+ 		if (Config.Xa)
+ 			break;
+ 		is_start = !cdr.AdpcmActive;
+-		cdr.AdpcmActive = !xa_decode_sector(&cdr.Xa, buf + 4, is_start);
++		{
++			PROF_BEGIN(PROF_XA);
++			cdr.AdpcmActive = !xa_decode_sector(&cdr.Xa, buf + 4, is_start);
++			PROF_END(PROF_XA);
++		}
+ 		if (cdr.AdpcmActive)
+ 			SPU_playADPCMchannel(&cdr.Xa, psxRegs.cycle, is_start);
+ 	} while (0);
+diff --git a/libpcsxcore/new_dynarec/assem_arm.h b/libpcsxcore/new_dynarec/assem_arm.h
+index 74b1657f..17c9a92f 100644
+--- a/libpcsxcore/new_dynarec/assem_arm.h
++++ b/libpcsxcore/new_dynarec/assem_arm.h
+@@ -37,7 +37,13 @@
+ extern char *invc_ptr;
+ 
+ // note: max due to branch encoding: arm 32M, arm64 128M
++#ifdef _3DS
++// PSX3D: 8MB is plenty for PS1 code and gives the Old 3DS's 64MB room for
++// save states (16MB left them failing with "not enough memory")
++#define TARGET_SIZE_2 23 // 2^23 = 8 megabytes
++#else
+ #define TARGET_SIZE_2 24 // 2^24 = 16 megabytes
++#endif
+ 
+ struct tramp_insns
+ {
+diff --git a/libpcsxcore/new_dynarec/new_dynarec.c b/libpcsxcore/new_dynarec/new_dynarec.c
+index b13e8bf3..3032ec28 100644
+--- a/libpcsxcore/new_dynarec/new_dynarec.c
++++ b/libpcsxcore/new_dynarec/new_dynarec.c
+@@ -41,6 +41,10 @@ static Jit g_jit;
+ unsigned long long psx3d_prof_t[PROF_N];
+ unsigned int psx3d_prof_c[PROF_N];
+ int psx3d_prof_on;
++// PSX3D: idle loop skipping (set by the frontend before a game starts)
++int psx3d_idle_skip;
++#define PSX3D_IDLE_CYCLES 1024
++unsigned int psx3d_idle_loops;   // polling loops found so far
+ #include "../psxhle.h"
+ #include "../psxinterpreter.h"
+ #include "../psxcounters.h"
+@@ -284,6 +288,7 @@ static struct decoded_insn
+   u_char is_exception:1;  // unconditional, also interp. fallback
+   u_char may_except:1;    // might generate an exception
+   u_char ls_type:2;       // load/store type (ls_width_type LS_*)
++  u_char is_idle:1;       // PSX3D: back-edge of a polling loop (pass1c_idle_loops)
+ } dops[MAXBLOCK];
+ 
+ enum ls_width_type {
+@@ -5451,6 +5456,13 @@ static void do_cc(struct compile_state *st, int i, const signed char i_regmap[],
+   }
+   count = cinfo[i].ccadj;
+   count_plus2 = count + CLOCK_ADJUST(2);
++  if (dops[i].is_idle) {
++    // PSX3D: a polling loop (see pass1c_idle_loops) - each time round
++    // costs PSX3D_IDLE_CYCLES of emulated time instead of a few, so time
++    // reaches whatever it waits for ~100x sooner in host time, while
++    // never overshooting by more than that
++    emit_addimm(HOST_CCREG, PSX3D_IDLE_CYCLES, HOST_CCREG);
++  }
+   if(taken==TAKEN && i==(cinfo[i].ba-st->start)>>2 && st->source[i+1]==0) {
+     // Idle loop
+     if(count&1) emit_addimm_and_set_flags(2*(count+2),HOST_CCREG);
+@@ -7628,6 +7640,152 @@ static noinline void pass1b_bt(struct compile_state *st)
+       dops[(cinfo[i].ba - st->start) >> 2].bt = 1;
+ }
+ 
++// PSX3D: idle loop detection.
++// A short backward branch whose loop body only reads memory and computes on
++// what it read (no stores, no calls, nothing carried over from the previous
++// time round) does the same thing every time until something else changes
++// memory or time passes (interrupt, DMA, timer, CD, GPU done). So each
++// time round is charged a big chunk of emulated time: the wait ends after
++// far fewer host iterations, overshooting it by at most that chunk.
++// Loads must be from RAM/scratchpad or from status registers that don't
++// change anything when read; FIFO-style data registers are refused, since
++// a loop draining one would then take a chunk of time per byte.
++static int psx3d_idle_addr_ok(u_int a)
++{
++  a &= 0x1fffffff;
++  if (a < 0x00800000) return 1;                          // RAM + mirrors
++  if (a >= 0x1f800000 && a < 0x1f800400) return 1;       // scratchpad
++  if (a >= 0x1f801070 && a < 0x1f801078) return 1;       // I_STAT/I_MASK
++  if (a >= 0x1f801080 && a < 0x1f801100) return 1;       // DMA
++  if (a >= 0x1f801100 && a < 0x1f801130) return 1;       // timers
++  if (a >= 0x1f801044 && a < 0x1f801048) return 1;       // JOY_STAT
++  if (a == 0x1f801800) return 1;                         // CD status/index
++  if (a >= 0x1f801814 && a < 0x1f801818) return 1;       // GPUSTAT
++  if (a >= 0x1f801daa && a < 0x1f801db0) return 1;       // SPUCNT/SPUSTAT
++  return 0;
++}
++
++// value of reg r at instruction j, if built by lui (+ addiu/ori) in the
++// straight-line code just before it
++static int psx3d_reg_const_before(struct compile_state *st, int j, int r,
++  int stop, u_int *val)
++{
++  int k, have_lo = 0, lo_op = 0;
++  u_int lo = 0;
++  if (r == 0) { *val = 0; return 1; }
++  for (k = j - 1; k >= stop && k >= j - 16; k--) {
++    if (dops[k].is_jump)
++      return 0;
++    if (dops[k].rt1 != r && dops[k].rt2 != r) {
++      if (dops[k].bt) return 0;   // another path joins here
++      continue;
++    }
++    if (dops[k].itype == IMM16 && dops[k].opcode == 0x0f) { // lui
++      *val = (u_int)cinfo[k].imm << 16;
++      if (have_lo)
++        *val = lo_op == 0x0d ? (*val | lo) : (*val + lo);
++      return 1;
++    }
++    if (!have_lo && dops[k].itype == IMM16 && dops[k].rs1 == r &&
++        (dops[k].opcode == 0x09 || dops[k].opcode == 0x0d)) { // addiu/ori r, r
++      have_lo = 1;
++      lo_op = dops[k].opcode;
++      lo = (u_int)cinfo[k].imm;
++      if (dops[k].bt) return 0;
++      continue;
++    }
++    return 0;
++  }
++  return 0;
++}
++
++static noinline void pass1c_idle_loops(struct compile_state *st)
++{
++  int i, j, t;
++  for (i = 0; i < st->slen; i++)
++    dops[i].is_idle = 0;
++  if (!psx3d_idle_skip)
++    return;
++  for (i = 0; i < st->slen - 1; i++)
++  {
++    uint64_t written = 0, so_far = 0;
++    int last_load_rt = -1, ok = 1;
++    if (dops[i].itype != CJUMP && dops[i].itype != SJUMP)
++      continue;
++    if (dops[i].rt1 == 31)             // BLTZAL/BGEZAL
++      continue;
++    if (!internal_branch(st, cinfo[i].ba))
++      continue;
++    t = (cinfo[i].ba - st->start) >> 2;
++    if (t > i || i - t > 12 || dops[t].is_ds)
++      continue;
++    if (t == i && st->source[i+1] == 0)
++      continue;                        // the dynarec's own idle loop case
++    // nothing else may branch into the loop
++    for (j = 0; j < st->slen && ok; j++)
++      if (j != i && dops[j].is_jump && cinfo[j].ba >= st->start + t*4
++          && cinfo[j].ba <= st->start + (i+1)*4)
++        ok = 0;
++    // body t..i-1, the branch i, its delay slot i+1
++    for (j = t; j <= i + 1 && ok; j++) {
++      if (j == i)
++        ;
++      else switch (dops[j].itype) {
++        case NOP: case LOAD: case LOADLR: case ALU: case SHIFT:
++        case SHIFTIMM: case IMM16: case MOV:
++          break;
++        default:
++          ok = 0;
++      }
++      if (dops[j].rt1) written |= 1ull << dops[j].rt1;
++      if (dops[j].rt2) written |= 1ull << dops[j].rt2;
++    }
++    // anything read before it's written this time round comes from the
++    // previous iteration (a counter, a timeout): not idle
++    for (j = t; j <= i + 1 && ok; j++) {
++      int rs[2] = { dops[j].rs1, dops[j].rs2 }, n;
++      for (n = 0; n < 2; n++) {
++        int r = rs[n];
++        if (r <= 0)
++          continue;
++        if (((written >> r) & 1) && !((so_far >> r) & 1))
++          ok = 0;
++        if (r == last_load_rt)         // load delay slot: reads the old value
++          ok = 0;
++      }
++      last_load_rt = (dops[j].itype == LOAD || dops[j].itype == LOADLR) ? dops[j].rt1 : -1;
++      if (dops[j].rt1) so_far |= 1ull << dops[j].rt1;
++      if (dops[j].rt2) so_far |= 1ull << dops[j].rt2;
++    }
++    // what do the loads read? Unknown addresses are let through only for a
++    // loop with a single load: draining a FIFO takes a status read plus a
++    // data read, a plain wait on one register or variable takes one.
++    int nloads = 0;
++    for (j = t; j <= i + 1; j++)
++      if (dops[j].itype == LOAD || dops[j].itype == LOADLR)
++        nloads++;
++    for (j = t; j <= i + 1 && ok; j++) {
++      u_int base;
++      int r;
++      if (dops[j].itype != LOAD && dops[j].itype != LOADLR)
++        continue;
++      r = dops[j].rs1;
++      if (psx3d_reg_const_before(st, j, r, t, &base) ||
++          (!((written >> r) & 1) && psx3d_reg_const_before(st, t, r, 0, &base)))
++        ok = psx3d_idle_addr_ok(base + (u_int)cinfo[j].imm);
++      else if ((r == 28 || r == 29 || r == 30) && !((written >> r) & 1))
++        ok = 1;                        // gp/sp/fp: RAM
++      else
++        ok = nloads == 1;
++    }
++    if (!ok)
++      continue;
++    dops[i].is_idle = 1;
++    if (psx3d_idle_loops++ < 32)
++      SysPrintf("idle loop @%08x (%d insns)\n", st->start + t*4, i - t + 2);
++  }
++}
++
+ // Basic liveness analysis for MIPS registers
+ static noinline void pass2b_unneeded_regs(struct compile_state *st,
+   int istart, int iend, int r)
+@@ -8011,7 +8169,7 @@ static noinline void pass3_register_alloc(struct compile_state *st, u_int addr)
+             alloc_cc(&current,i);
+             dirty_reg(&current,CCREG);
+             alloc_reg(st,&current,i,dops[i].rs1);
+-            if(dops[i].rs1&&(dops[i].rs1==dops[i+1].rt1||dops[i].rs1==dops[i+1].rt2)) {
++            if((dops[i].rs1&&(dops[i].rs1==dops[i+1].rt1||dops[i].rs1==dops[i+1].rt2))) {
+               // The delay slot overwrites one of our conditions.
+               // Allocate the branch condition registers instead.
+               current.isconst=0;
+@@ -9729,6 +9887,7 @@ static int noinline new_recompile_block_(u_int addr)
+   pass1b_bt(&st);
+ 
+   int clear_hack_addr = apply_hacks(&st);
++  pass1c_idle_loops(&st);
+ 
+   /* Pass 2 - unneeded, register dependencies */
+ 
+diff --git a/libpcsxcore/psx3d_prof.h b/libpcsxcore/psx3d_prof.h
+index 9ed05057..b49bb538 100644
+--- a/libpcsxcore/psx3d_prof.h
++++ b/libpcsxcore/psx3d_prof.h
+@@ -5,7 +5,7 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+-enum { PROF_COMPILE, PROF_INVAL, PROF_SPU, PROF_GPU, PROF_IRQ, PROF_CDR, PROF_N };
++enum { PROF_COMPILE, PROF_INVAL, PROF_SPU, PROF_GPU, PROF_IRQ, PROF_CDR, PROF_XA, PROF_VOUT, PROF_N };
+ extern unsigned long long psx3d_prof_t[PROF_N];
+ extern unsigned int psx3d_prof_c[PROF_N];
+ extern int psx3d_prof_on;
+diff --git a/libpcsxcore/psxevents.c b/libpcsxcore/psxevents.c
+index f045f274..9fdbab3b 100644
+--- a/libpcsxcore/psxevents.c
++++ b/libpcsxcore/psxevents.c
+@@ -62,6 +62,28 @@ static irq_func * const irq_funcs[] = {
+ 	[PSXINT_RCNT] = psxRcntUpdate,
+ };
+ 
++// PSX3D profiler: time spent in each kind of event, and where the PS1 CPU
++// was when events came due (a cheap time-sampled view of guest code: a
++// game spinning in a loop shows up as one address taking a big share)
++unsigned long long psx3d_irq_t[PSXINT_COUNT];
++unsigned int psx3d_irq_c[PSXINT_COUNT];
++#define PSX3D_PCS 64
++unsigned int psx3d_pcs_pc[PSX3D_PCS], psx3d_pcs_n[PSX3D_PCS], psx3d_pcs_total;
++
++static void psx3d_pc_sample(u32 pc)
++{
++	u32 h = (pc >> 2) * 2654435761u >> 26, k;
++	psx3d_pcs_total++;
++	for (k = 0; k < 8; k++, h = (h + 1) & (PSX3D_PCS - 1)) {
++		if (psx3d_pcs_n[h] == 0)
++			psx3d_pcs_pc[h] = pc;
++		if (psx3d_pcs_pc[h] == pc) {
++			psx3d_pcs_n[h]++;
++			return;
++		}
++	}
++}
++
+ void irq_test(psxCP0Regs *cp0)
+ {
+ 	psxRegisters *regs = cp0TOpsxRegs(cp0);
+@@ -74,7 +96,14 @@ void irq_test(psxCP0Regs *cp0)
+ 		if ((s32)(cycle - regs->event_cycles[irq]) >= 0) {
+ 			// note: irq_funcs() also modify regs->interrupt
+ 			regs->interrupt &= ~(1u << irq);
+-			irq_funcs[irq]();
++			if (psx3d_prof_on) {
++				unsigned long long t0 = PROF_TICK();
++				irq_funcs[irq]();
++				psx3d_irq_t[irq] += PROF_TICK() - t0;
++				psx3d_irq_c[irq]++;
++			}
++			else
++				irq_funcs[irq]();
+ 		}
+ 	}
+ 
+@@ -89,6 +118,8 @@ static void gen_interupt_(psxCP0Regs *cp0);
+ void gen_interupt(psxCP0Regs *cp0)
+ {
+ 	PROF_BEGIN(PROF_IRQ);
++	if (psx3d_prof_on)
++		psx3d_pc_sample(cp0TOpsxRegs(cp0)->pc);
+ 	gen_interupt_(cp0);
+ 	PROF_END(PROF_IRQ);
+ }
+diff --git a/plugins/gpu_unai/gpulib_if.cpp b/plugins/gpu_unai/gpulib_if.cpp
+index a7f0c13a..fa231670 100644
+--- a/plugins/gpu_unai/gpulib_if.cpp
++++ b/plugins/gpu_unai/gpulib_if.cpp
+@@ -708,6 +708,23 @@ static void psx3d_apply_shift(u32 cmd, u32 pack, int eye)
+ 
+ extern const unsigned char cmd_lengths[256];
+ 
++// PSX3D profiler: drawing time by kind of primitive
++#include "../../libpcsxcore/psx3d_prof.h"
++extern "C" {
++unsigned long long psx3d_gprof_t[9];
++unsigned int psx3d_gprof_c[9];
++}
++// 0 fill, 1 polygon, 2 textured polygon, 3 textured polygon semi-transparent,
++// 4 line, 5 rectangle, 6 sprite, 7 sprite semi-transparent, 8 other
++static int psx3d_gcls(u32 cmd)
++{
++  if (cmd == 0x02) return 0;
++  if (cmd >= 0x20 && cmd < 0x40) return !(cmd & 4) ? 1 : (cmd & 2) ? 3 : 2;
++  if (cmd >= 0x40 && cmd < 0x60) return 4;
++  if (cmd >= 0x60 && cmd < 0x80) return !(cmd & 4) ? 5 : (cmd & 2) ? 7 : 6;
++  return 8;
++}
++
+ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
+  int *cycles_sum_out, int *cycles_last, int *last_cmd)
+ {
+@@ -717,6 +734,8 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
+   le32_t *list_start = list;
+   le32_t *list_end = list + list_len;
+   le16_t *vram_saved = NULL;
++  unsigned long long gp_t = 0;
++  int gp_cls = -1;
+ 
+   if (IS_OLD_RENDERER()) {
+     return oldunai_do_cmd_list(list_, list_len, ex_regs,
+@@ -731,6 +750,14 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
+       cmd = -1;
+       break;
+     }
++    if (psx3d_prof_on) {
++      unsigned long long now = PROF_TICK();
++      if (gp_cls >= 0)
++        psx3d_gprof_t[gp_cls] += now - gp_t;
++      gp_t = now;
++      gp_cls = psx3d_gcls(cmd);
++      psx3d_gprof_c[gp_cls]++;
++    }
+ 
+     // with the async GPU, gpu_async.c records depth on the main thread
+     if (psx3d_stereo_enabled && !gpu_async_enabled(&gpu))
+@@ -1177,6 +1204,8 @@ int renderer_do_cmd_list(u32 *list_, int list_len, uint32_t *ex_regs,
+   }
+ 
+ breakloop:
++  if (psx3d_prof_on && gp_cls >= 0)
++    psx3d_gprof_t[gp_cls] += PROF_TICK() - gp_t;
+   if (vram_saved)
+     gpu_unai.vram = vram_saved;
+   ex_regs[1] &= ~0x1ff;
+diff --git a/plugins/gpulib/gpu.c b/plugins/gpulib/gpu.c
+index 811e7deb..d840e232 100644
+--- a/plugins/gpulib/gpu.c
++++ b/plugins/gpulib/gpu.c
+@@ -20,6 +20,9 @@
+ #include "../../frontend/plugin_lib.h"
+ #include "../../include/compiler_features.h"
+ 
++// PSX3D: frames skipped / frames the skip was refused (game draws on screen)
++unsigned int psx3d_fskip[2];
++
+ #ifndef ARRAY_SIZE
+ #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+ #endif
+@@ -424,6 +427,8 @@ void GPUwriteStatus(uint32_t data)
+           uint32_t flip_delay = frame - gpu.frameskip.last_flip_frame;
+           if (flip_delay)
+             decide_frameskip(&gpu, flip_delay);
++          if (gpu.frameskip.active)
++            psx3d_fskip[!gpu.frameskip.allow]++;   // PSX3D profiler
+           if (!gpu.frameskip.active || !gpu.frameskip.allow)
+             frameskip_prepare_noskip(&gpu);
+         }

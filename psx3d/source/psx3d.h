@@ -75,6 +75,7 @@ bool video_init(void);
 void video_exit(void);
 void *video_framebuffer(unsigned width, unsigned height, size_t *pitch);
 void video_frame(const void *data, unsigned width, unsigned height, size_t pitch);
+bool video_frame_pending(void);
 void video_present(bool show_game, void (*draw_top)(void *),
 	void (*draw_bottom)(void *), void *ud);
 void video_present_vsync(bool show_game, void (*draw_top)(void *),
@@ -92,9 +93,20 @@ u64 video_take_xfer_ticks(void);
 void psx3d_set_strength(float px);
 void psx3d_set_half3d(int on);
 // core profiling (libpcsxcore/psx3d_prof.h)
-extern unsigned long long psx3d_prof_t[6];
-extern unsigned int psx3d_prof_c[6];
+enum { PROF_COMPILE, PROF_INVAL, PROF_SPU, PROF_GPU, PROF_IRQ, PROF_CDR, PROF_XA, PROF_VOUT, PROF_N };
+extern unsigned long long psx3d_prof_t[PROF_N];
+extern unsigned int psx3d_prof_c[PROF_N];
 extern int psx3d_prof_on;
+extern unsigned long long psx3d_irq_t[];   // per event kind (PSXINT_*)
+extern unsigned int psx3d_irq_c[];
+#define PSX3D_IRQ_KINDS 15
+extern unsigned int psx3d_pcs_pc[64], psx3d_pcs_n[64], psx3d_pcs_total;   // guest PC samples
+extern unsigned long long psx3d_gprof_t[9];   // drawing time by primitive kind
+extern unsigned int psx3d_gprof_c[9];
+extern unsigned int psx3d_fskip[2];           // frames skipped / skip refused
+extern int psx3d_idle_skip;                   // dynarec: polling loop detection
+extern unsigned int psx3d_idle_loops;
+#define PSX3D_OPT_IDLE "psx3d_idle_skip"
 void new_dynarec_print_stats(void);
 extern bool sw_prof;
 void psx3d_stats(float *zc, int *n3d, int *n2d, int *dmin, int *dmax, int *zmin, int *zmax);

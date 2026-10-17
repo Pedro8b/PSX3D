@@ -76,6 +76,10 @@ static const char *locked_value(const char *key)
 			return "simple";
 		if (strcmp(key, "pcsx_rearmed_spu_reverb") == 0)
 			return NULL;   // a choice on Old 3DS (default off, below)
+		// half-height drawing: a choice on Old 3DS (default on, below); the
+		// core shows each drawn line twice
+		if (strcmp(key, "pcsx_rearmed_gpu_unai_skipline") == 0)
+			return NULL;
 	}
 	for (size_t i = 0; i < sizeof(locked) / sizeof(locked[0]); i++)
 		if (strcmp(locked[i][0], key) == 0)
@@ -138,8 +142,22 @@ void options_register(const struct retro_variable *vars)
 	finish_register();
 }
 
+// PSX3D's own speed options, listed among the core's. The core never asks
+// for them; the frontend reads them with options_get().
+static const struct { const char *key, *desc, *def, *values[3]; } own_opts[] = {
+	{ PSX3D_OPT_IDLE, "Idle loop skip (PSX3D)", "disabled", { "disabled", "enabled", NULL } },
+};
+
 static void finish_register(void)
 {
+	for (size_t k = 0; k < sizeof(own_opts) / sizeof(own_opts[0]) && nopts < MAX_OPTIONS; k++) {
+		option_t *o = &opts[nopts++];
+		o->key = strdup(own_opts[k].key);
+		o->desc = strdup(own_opts[k].desc);
+		o->def = strdup(own_opts[k].def);
+		for (int j = 0; own_opts[k].values[j]; j++)
+			o->values[o->nvalues++] = strdup(own_opts[k].values[j]);
+	}
 	nvisible = 0;
 	for (int i = 0; i < nopts; i++)
 		if (!is_hidden(opts[i].key))
@@ -209,6 +227,10 @@ const char *options_get(const char *key)
 			// GTE speed hacks: rare glitches, measurable gain on a 268MHz core
 			{ "pcsx_rearmed_gteregsunneeded", "enabled" },
 			{ "pcsx_rearmed_nogteflags", "enabled" },
+			// draw every other line, show each twice: drawing is most of
+			// the frame time on Old 3DS (measured 7-28 of 18-35ms in SotN)
+			{ "pcsx_rearmed_gpu_unai_skipline", "enabled" },
+			{ PSX3D_OPT_IDLE, "enabled" },
 		};
 		for (size_t i = 0; i < sizeof(o3ds) / sizeof(o3ds[0]); i++)
 			if (strcmp(key, o3ds[i][0]) == 0)
@@ -263,7 +285,9 @@ const char *options_cycle(int i, int dir)
 static const char *const notes[][3] = {
 	// key, impact, note (NULL = use the core's text)
 	{ "pcsx_rearmed_psxclock", "Lower = faster, but games run their logic slower", "How fast the emulated PS1 CPU runs. Lowering it saves a lot of 3DS CPU time (Crash on Old 3DS: 36 -> 44 FPS at 30%) but games that need the full CPU will slow down or stutter. auto picks per game." },
-	{ "pcsx_rearmed_frameskip_type", "Faster when the 3DS can't keep up", "Skips drawing some frames when the 3DS falls behind, so the game itself keeps full speed. auto skips only when needed." },
+	{ "pcsx_rearmed_frameskip_type", "Faster when the 3DS can't keep up", "Skips drawing some frames when the 3DS falls behind, so the game itself keeps full speed. auto skips only when a frame came late; auto_threshold goes by the sound buffer instead." },
+	{ "pcsx_rearmed_gpu_unai_skipline", "Up to 2x faster drawing, half the vertical detail", "Draws only every other line and shows each one twice. Drawing is the biggest cost on Old 3DS; this roughly halves it. Text and fine pixel art look blockier. A few games that reuse what they drew as a texture may show stripes there." },
+	{ PSX3D_OPT_IDLE, "Faster when games wait in a loop", "When a game spins in a short loop waiting for something (the GPU, the CD, a timer), let emulated time pass in bigger steps instead of running the loop thousands of times. Turn off if a game misbehaves. Fully applies after restarting the game." },
 	{ "pcsx_rearmed_frameskip_threshold", "Higher = skips sooner", NULL },
 	{ "pcsx_rearmed_frameskip_interval", "Higher = smoother speed, choppier picture", "The most frames that can be skipped in a row." },
 	{ "pcsx_rearmed_dithering", "Slightly slower when on", "The PS1's colour dithering pattern. Off gives a cleaner picture and saves a little time." },

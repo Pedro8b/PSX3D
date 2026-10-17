@@ -889,6 +889,83 @@ static void game_apt(APT_HookType hook, void *param)
 		game_frames = 0;
 }
 
+// once a second with the profiler on (debug=1): where the frame time went
+static void prof_report(int frames)
+{
+	static const char *const names[PROF_N] = { "compile", "inval", "spu", "gpu", "irq", "cdr", "xa", "vout" };
+	static const char *const irq_names[PSX3D_IRQ_KINDS] = { "sio", "cdr", "cdread", "gpudma", "mdecout",
+		"spudma", "spuirq", "mdecin", "gpuotc", "cdrdma", "drc", "rcnt", "cdrlid", "irq10", "spu" };
+	static const char *const g_names[9] = { "fill", "poly", "polyT", "polyT~", "line", "rect", "spr", "spr~", "other" };
+	char b[320];
+	int n, k;
+	double per = frames ? 1.0 / frames : 0, ms = 1.0 / CPU_TICKS_PER_MSEC;
+
+	n = 0;
+	for (k = 0; k < PROF_N; k++) {
+		n += snprintf(b + n, sizeof(b) - n, " %s %.2f", names[k], psx3d_prof_t[k] * per * ms);
+		psx3d_prof_t[k] = 0;
+		psx3d_prof_c[k] = 0;
+	}
+	log_printf("  prof ms/frame:%s\n", b);
+
+	// events, biggest first (rcnt includes vblank: picture output; cdread: disc + XA)
+	n = 0;
+	for (int shown = 0; shown < 5; shown++) {
+		int best = -1;
+		for (k = 0; k < PSX3D_IRQ_KINDS; k++)
+			if (psx3d_irq_t[k] && (best < 0 || psx3d_irq_t[k] > psx3d_irq_t[best]))
+				best = k;
+		if (best < 0)
+			break;
+		n += snprintf(b + n, sizeof(b) - n, " %s %.2f/%u", irq_names[best],
+			psx3d_irq_t[best] * per * ms, (unsigned)(psx3d_irq_c[best] * per + 0.5));
+		psx3d_irq_t[best] = 0;
+	}
+	for (k = 0; k < PSX3D_IRQ_KINDS; k++)
+		psx3d_irq_t[k] = psx3d_irq_c[k] = 0;
+	log_printf("  events:%s\n", n ? b : " -");
+
+	n = 0;
+	for (k = 0; k < 9; k++) {
+		if (psx3d_gprof_c[k])
+			n += snprintf(b + n, sizeof(b) - n, " %s %.2f/%u", g_names[k],
+				psx3d_gprof_t[k] * per * ms, (unsigned)(psx3d_gprof_c[k] * per + 0.5));
+		psx3d_gprof_t[k] = 0;
+		psx3d_gprof_c[k] = 0;
+	}
+	log_printf("  draw:%s | skipped %u refused %u | idle loops %u\n", n ? b : " -",
+		psx3d_fskip[0], psx3d_fskip[1], psx3d_idle_loops);
+	psx3d_fskip[0] = psx3d_fskip[1] = 0;
+
+	// where the PS1 CPU spends its time: top guest addresses, with the code
+	// there so a waiting loop can be recognised
+	if (psx3d_pcs_total) {
+		const u32 *ram = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+		n = 0;
+		for (int shown = 0; shown < 3; shown++) {
+			int best = -1;
+			for (k = 0; k < 64; k++)
+				if (psx3d_pcs_n[k] && (best < 0 || psx3d_pcs_n[k] > psx3d_pcs_n[best]))
+					best = k;
+			if (best < 0)
+				break;
+			u32 pc = psx3d_pcs_pc[best];
+			n += snprintf(b + n, sizeof(b) - n, " %08lx %u%%", pc, psx3d_pcs_n[best] * 100 / psx3d_pcs_total);
+			if (ram && (pc & 0x1fffffff) < 0x200000) {
+				const u32 *w = ram + ((pc & 0x1ffffc) >> 2);
+				n += snprintf(b + n, sizeof(b) - n, "[%08lx %08lx %08lx %08lx]", w[0], w[1], w[2], w[3]);
+			}
+			psx3d_pcs_n[best] = 0;
+		}
+		log_printf("  pc (%u samples):%s\n", psx3d_pcs_total, b);
+		memset(psx3d_pcs_n, 0, sizeof(psx3d_pcs_n));
+		psx3d_pcs_total = 0;
+	}
+	static int calls;
+	if (++calls % 10 == 0)
+		new_dynarec_print_stats();   // code cache use, every 10s
+}
+
 bool emu_run_game(const char *path, const char *save_name, const char *title)
 {
 	struct retro_game_info info = { .path = path };
@@ -906,6 +983,11 @@ bool emu_run_game(const char *path, const char *save_name, const char *title)
 	log_printf("loading %s\n", path);
 	config_game_begin(game_name);   // before loading: the core reads the widescreen option at load
 
+	{
+		const char *v = options_get(PSX3D_OPT_IDLE);
+		psx3d_idle_skip = v && !strcmp(v, "enabled");
+		log_printf("idle loop skip: %s\n", psx3d_idle_skip ? "on" : "off");
+	}
 	retro_init();
 	core_initialized = true;
 	if (!retro_load_game(&info)) {
@@ -943,6 +1025,7 @@ bool emu_run_game(const char *path, const char *save_name, const char *title)
 	fps_t0 = osGetTime();
 	u64 t_run = 0, t_present = 0, t_run_max = 0;
 	u64 next_deadline = svcGetSystemTick();
+	int fskip_by_time = -1;
 	aptHookCookie apt_cookie;
 	aptHook(&apt_cookie, game_apt, NULL);
 	while (aptMainLoop()) {
@@ -952,6 +1035,8 @@ bool emu_run_game(const char *path, const char *save_name, const char *title)
 		// screen only at vblank, so there is no tearing.
 		u64 frame_ticks = (u64)(SYSCLOCK_ARM11 / fps_target);
 		u64 now_t = svcGetSystemTick();
+		// this frame starts late: the last one took longer than a frame
+		bool behind = now_t > next_deadline + frame_ticks / 8;
 		if (now_t < next_deadline)
 			svcSleepThread((next_deadline - now_t) * 1000000000ULL / SYSCLOCK_ARM11);
 		else if (now_t > next_deadline + 3 * frame_ticks)
@@ -959,8 +1044,20 @@ bool emu_run_game(const char *path, const char *save_name, const char *title)
 		next_deadline += frame_ticks;
 
 		if (abuf_status_cb) {
-			unsigned occ = has_audio ? audio_occupancy() : 50;
-			abuf_status_cb(has_audio, occ, occ < 20);
+			// frameskip "auto": skip drawing the next frame whenever this one
+			// started late, so the game keeps its speed. (The sound buffer
+			// says the same thing much later, and the sound stretching keeps
+			// it from emptying anyway.) "auto_threshold" still goes by sound.
+			if (fskip_by_time < 0 || game_frames == 0) {   // start, or back from the menu
+				const char *t = options_get("pcsx_rearmed_frameskip_type");
+				fskip_by_time = t && !strcmp(t, "auto");
+			}
+			if (fskip_by_time)
+				abuf_status_cb(true, behind ? 0 : 100, behind);
+			else {
+				unsigned occ = has_audio ? audio_occupancy() : 50;
+				abuf_status_cb(has_audio, occ, occ < 20);
+			}
 		}
 		u64 t0 = svcGetSystemTick();
 		static bool rewind_hint;
@@ -1027,10 +1124,17 @@ bool emu_run_game(const char *path, const char *save_name, const char *title)
 			next_deadline = svcGetSystemTick();
 		}
 
-		ui_begin();
-		t1 = svcGetSystemTick();
-		video_present(true, speed_icon ? game_draw_top : NULL, game_draw_bottom, NULL);
-		t_present += svcGetSystemTick() - t1;
+		// A skipped frame brings no new picture: unless something on screen
+		// changes, keep showing the last one and save the ~1ms a present costs
+		static float shown_fps = -1;
+		if (video_frame_pending() || osd_frames > 0 || speed_icon || touch_buttons_active() ||
+		    g_cfg.stereo || game_frames < 4 || (g_cfg.show_fps && shown_fps != fps_measured)) {
+			ui_begin();
+			t1 = svcGetSystemTick();
+			video_present(true, speed_icon ? game_draw_top : NULL, game_draw_bottom, NULL);
+			t_present += svcGetSystemTick() - t1;
+			shown_fps = fps_measured;
+		}
 
 		if (++game_frames == 120 && g_cfg.bottom_off && !touch_buttons_active() && !g_cfg.show_fps)
 			bottom_backlight(false);
@@ -1052,17 +1156,8 @@ bool emu_run_game(const char *path, const char *save_name, const char *title)
 			char abuf[160];
 			audio_stats(abuf, sizeof(abuf));
 			log_printf("  %s\n", abuf);
-			if (sw_prof) {
-				static const char *const names[6] = { "compile", "inval", "spu", "gpu", "irq", "cdr" };
-				char pb[200]; int n = 0;
-				for (int k = 0; k < 5; k++) {
-					n += snprintf(pb + n, sizeof(pb) - n, " %s %.2fms/%u", names[k],
-						psx3d_prof_t[k] / (double)fps_frames / CPU_TICKS_PER_MSEC, psx3d_prof_c[k] / (fps_frames ? fps_frames : 1));
-					psx3d_prof_t[k] = 0; psx3d_prof_c[k] = 0;
-				}
-				log_printf("  prof (per frame):%s\n", pb);
-				new_dynarec_print_stats();
-			}
+			if (sw_prof)
+				prof_report(fps_frames);
 			t_run = t_present = t_run_max = 0;
 			present_count = 0;
 			fps_frames = 0;

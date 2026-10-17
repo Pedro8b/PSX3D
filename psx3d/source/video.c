@@ -153,6 +153,12 @@ void *video_framebuffer(unsigned width, unsigned height, size_t *pitch)
 	return fbs[fb_cur];
 }
 
+// a new picture is waiting to be shown
+bool video_frame_pending(void)
+{
+	return pending != NULL;
+}
+
 void video_frame(const void *data, unsigned width, unsigned height, size_t pitch)
 {
 	if (!data || width == 0 || height == 0)
