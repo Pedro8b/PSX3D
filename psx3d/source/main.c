@@ -1,3 +1,4 @@
+#include <time.h>
 // PSX3D entry point.
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,7 +149,12 @@ int main(int argc, char **argv)
 	mkdir(PSX3D_SAVE_DIR, 0777);
 	mkdir(PSX3D_STATE_DIR, 0777);
 	log_init();
-	log_printf("PSX3D " PSX3D_VERSION "\n");
+	{
+		time_t now = time(NULL);
+		char when[32];
+		strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", gmtime(&now));
+		log_printf("PSX3D " PSX3D_VERSION " (O3DS fork), started %s\n", when);
+	}
 	{
 		APT_CheckNew3DS(&g_new3ds);
 		// borrow the syscore: 80% on Old 3DS (drawing runs there), 35% on New

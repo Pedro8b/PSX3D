@@ -15,7 +15,7 @@
 #define PSX3D_SAVE_DIR PSX3D_DIR "/saves"
 #define PSX3D_STATE_DIR PSX3D_DIR "/states"
 #define PSX3D_CONFIG   PSX3D_DIR "/config.ini"
-#define PSX3D_LOG      PSX3D_DIR "/log.txt"
+#define PSX3D_LOG      PSX3D_DIR "/log_o3ds.txt"   // fork: own log, so it never gets mixed up with the original's
 
 #define PATH_LEN 512
 
